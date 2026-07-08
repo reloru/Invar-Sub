@@ -1,0 +1,11 @@
+name = "invar-sub"
+main = "src/index.js"
+compatibility_date = "2026-07-08"
+
+# No custom domain yet — the worker deploys to the free
+# https://invar-sub.<your-account>.workers.dev URL.
+#
+# Once a domain is purchased and added to Cloudflare, uncomment and edit:
+# routes = [
+#   { pattern = "yourdomain.com", custom_domain = true }
+# ]
