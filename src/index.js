@@ -447,9 +447,14 @@ const HTML_ASSET = `<!DOCTYPE html>
       setMetric('m-frames', data.metrics.frames);
       setMetric('m-fdens', data.metrics.frameDensity);
 
+      var CLASS_LABELS = {
+        notation: 'notation', eponymPair: 'eponyms', jargonPair: 'jargon pairs',
+        standalone: 'standalone terms', coinage: 'coinages',
+        neologism: 'neologisms', quantity: 'numeric claims'
+      };
       var byClass = data.metrics.byClass || {};
       setMetric('m-byclass', Object.keys(byClass).map(function(k){
-        return k + ' ' + byClass[k];
+        return (CLASS_LABELS[k] || k) + ' ' + byClass[k];
       }).join(' · '));
 
       verdict.hidden = false;
