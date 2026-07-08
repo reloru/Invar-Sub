@@ -81,6 +81,30 @@ const DETECTORS = [
     // Single technical tokens that carry apparatus weight on their own.
     regex: /\beigen[a-z]+\b|\bcohomolog[a-z]*\b|\bfunctorial\b|\bmonoidal\b/gi,
   },
+  {
+    cls: "coinage",
+    // Title Case runs of 3+ words: named models, frameworks, instruments
+    // ("Pneumatic Thought Calibrator"). Leading articles/pronouns excluded
+    // so ordinary sentence openings don't match. Will fire on real proper
+    // nouns of 3+ words — an accepted misfire for the target domain.
+    regex:
+      /\b(?!(?:The|A|An|In|On|At|It|We|This|That|These|Those|Our|If|As|For|But|And|Or|To|By)\b)[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*(?:\s+[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*){2,5}\b/g,
+  },
+  {
+    cls: "neologism",
+    // Quoted lowercase hyphenated coinages: “lectro-memes”. Quotes and any
+    // American-style trailing punctuation (“lectro-memes.”) stay outside the
+    // span so substitution preserves them.
+    regex: /(?<=[“"'‘])[a-z]+(?:-[a-z]+)+(?=[.,;:!?]?[”"'’])/g,
+  },
+  {
+    cls: "quantity",
+    // Numeric claims: percentages, factors, sample sizes. Not pooled —
+    // digits are swapped in place with format preserved, so "82%" mutates
+    // to another percentage and "47.3 participants" to another decimal count.
+    regex:
+      /\b\d+(?:\.\d+)?\s*(?:%|percent\b)|\bfactors?\s+of\s+\d+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\s+(?:participants|subjects|respondents|patients|trials|samples|observations)\b/gi,
+  },
 ];
 
 const POOLS = {
@@ -102,6 +126,16 @@ const POOLS = {
     "topological closure", "variational manifold", "categorical fibration",
     "asymptotic regularization",
   ],
+  coinage: [
+    "Ontological Drift Assembly", "Recursive Sentiment Lattice",
+    "Harmonic Cognition Registry", "Distributed Epistemic Turbine",
+    "Modular Inference Prism", "Sequential Abstraction Chamber",
+    "Parametric Insight Manifold", "Fractal Attention Compass",
+  ],
+  neologism: [
+    "chrono-glyphs", "psycho-lattices", "flux-tokens",
+    "meta-spores", "gravito-memes", "somno-vectors",
+  ],
 };
 
 // Rhetorical framing moves. Bounded patterns — no unanchored `.*?`, and no
@@ -115,6 +149,15 @@ const FRAMES = [
   /\bunder\s+(?:that|this)\s+assumption\b/gi,
   /\bthis\s+is\s+(?:exactly|precisely)\s+(?:what|why|how|the)\b/gi,
   /\bwhat(?:'s| is)\s+(?:really|actually)\s+(?:happening|going on|at stake)\b/gi,
+  // Academic boilerplate: authority moves that assert significance without
+  // carrying evidence. A distinct family from the argumentative frames above.
+  /\bstatistically\s+significant\b/gi,
+  /\bgroundbreaking\s+(?:perspective|approach|framework|study|insight|finding)s?\b/gi,
+  /\bchallenges?\s+conventional\s+(?:assumptions|wisdom|thinking|models)\b/gi,
+  /\bfuture\s+(?:research|investigations?|studies|work)\s+(?:should|will|must|could|may)\b/gi,
+  /\bpromising\s+(?:foundation|avenue|direction)s?\b/gi,
+  /\bexpands?\s+upon\s+previous\s+\w+/gi,
+  /\bincreasingly\s+focused\s+on\b/gi,
 ];
 
 // DJB2-XOR kept unsigned via >>> 0 (Math.abs on a 32-bit signed hash fails at
@@ -147,24 +190,58 @@ function collectSpans(text) {
   return kept;
 }
 
+// Format-preserving digit swap: every digit is rehashed in place, run-leading
+// digits stay 1-9 so magnitudes hold ("82" can't become "07"). Non-digits
+// (decimal points, "%", "participants") pass through untouched.
+function swapDigits(match, seed, start) {
+  let runStart = true;
+  let out = "";
+  for (let i = 0; i < match.length; i++) {
+    const c = match[i];
+    if (c >= "0" && c <= "9") {
+      const h = hash32(`${seed}:${match}:${start}:${i}`);
+      out += String(runStart ? 1 + (h % 9) : h % 10);
+      runStart = false;
+    } else {
+      out += c;
+      runStart = true;
+    }
+  }
+  // An identity swap is not a test; rotate the last digit ((d % 9) + 1 never
+  // maps a digit to itself).
+  if (out === match) {
+    out = out.replace(/(\d)(?=\D*$)/, (d) => String((Number(d) % 9) + 1));
+  }
+  return out;
+}
+
 function mutate(text, seed) {
   const spans = collectSpans(text);
+  const byClass = {};
+  for (const d of DETECTORS) byClass[d.cls] = 0;
   let out = "";
   let pos = 0;
   for (const s of spans) {
-    const pool = POOLS[s.cls];
-    let idx = hash32(`${seed}:${s.match}:${s.start}`) % pool.length;
-    // An identity swap is not a test; advance to the next pool entry.
-    if (pool[idx].toLowerCase() === s.match.toLowerCase()) idx = (idx + 1) % pool.length;
-    out += text.slice(pos, s.start) + "⟦" + pool[idx] + "⟧";
+    byClass[s.cls]++;
+    let replacement;
+    if (s.cls === "quantity") {
+      replacement = swapDigits(s.match, seed, s.start);
+    } else {
+      const pool = POOLS[s.cls];
+      let idx = hash32(`${seed}:${s.match}:${s.start}`) % pool.length;
+      // An identity swap is not a test; advance to the next pool entry.
+      if (pool[idx].toLowerCase() === s.match.toLowerCase()) idx = (idx + 1) % pool.length;
+      replacement = pool[idx];
+    }
+    out += text.slice(pos, s.start) + "⟦" + replacement + "⟧";
     pos = s.end;
   }
   out += text.slice(pos);
-  return { mutatedText: out, substitutions: spans.length };
+  return { mutatedText: out, substitutions: spans.length, byClass };
 }
 
 function analyze(text, seed) {
-  const { mutatedText, substitutions } = mutate(text, seed);
+  const { mutatedText, substitutions, byClass } = mutate(text, seed);
 
   let frames = 0;
   for (const f of FRAMES) {
@@ -177,12 +254,21 @@ function analyze(text, seed) {
   const subDensity = +((substitutions / tokens) * 100).toFixed(2);
   const frameDensity = +((frames / tokens) * 100).toFixed(2);
 
+  // Numeric claims convict only in the company of swappable conceptual
+  // apparatus — honest results sections are full of load-bearing numbers,
+  // and numbers alone should not tip the verdict.
+  const conceptual = substitutions - byClass.quantity;
+  const effSubs = conceptual >= 2 ? substitutions : conceptual;
+  const effDensity = (effSubs / tokens) * 100;
+
+  // Density thresholds carry absolute floors so short snippets can't reach
+  // a verdict on denominator luck alone.
   let verdict;
   if (substitutions === 0 && frames === 0) {
     verdict = "NO APPARATUS DETECTED";
-  } else if (subDensity >= 2 && frameDensity >= 1) {
+  } else if (effDensity >= 2 && frameDensity >= 1 && effSubs >= 5 && frames >= 3) {
     verdict = "HIGH: DENSE APPARATUS + FRAMING RHETORIC";
-  } else if (subDensity >= 2 || frameDensity >= 1.5) {
+  } else if ((effDensity >= 2 && effSubs >= 4) || (frameDensity >= 1.5 && frames >= 3)) {
     verdict = "ELEVATED: ONE SIGNAL HIGH";
   } else {
     verdict = "LOW / CONTENT-DEPENDENT";
@@ -191,7 +277,7 @@ function analyze(text, seed) {
   return {
     seed,
     mutatedText,
-    metrics: { tokens, substitutions, subDensity, frames, frameDensity },
+    metrics: { tokens, substitutions, subDensity, frames, frameDensity, byClass },
     verdict,
     note:
       "The verdict is a prior, not a proof. The test is the mutation itself: " +
@@ -264,6 +350,7 @@ const HTML_ASSET = `<!DOCTYPE html>
     letter-spacing:.1em;transform:rotate(-1.2deg);
   }
   .stamp.hot{border-color:var(--mark);color:var(--mark)}
+  .byclass{margin-top:.6rem;color:var(--dim);font-size:.8rem;letter-spacing:.04em}
   footer{margin-top:1.6rem;color:var(--dim);font-size:.78rem;max-width:70ch}
   @media(prefers-reduced-motion:no-preference){
     .stamp{transition:transform .12s ease}
@@ -275,14 +362,14 @@ const HTML_ASSET = `<!DOCTYPE html>
 <div class="sheet">
   <header>
     <h1>Substitution Invariance Test</h1>
-    <small>v2.0 — class-preserving mutation of technical apparatus, edge-executed</small>
+    <small>v2.1 — class-preserving mutation of technical and pseudo-technical apparatus, edge-executed</small>
   </header>
 
   <div class="grid">
     <section>
       <label for="input-text">Typescript under examination</label>
       <textarea id="input-text" spellcheck="false"
-        placeholder="Paste prose whose rigor you suspect is decorative. Notation, eponyms, and latinate term-pairs will be swapped for arbitrary same-class terms."></textarea>
+        placeholder="Paste prose whose rigor you suspect is decorative. Notation, eponyms, latinate term-pairs, Title-Case coinages, and quoted neologisms are swapped for arbitrary same-class terms; numeric claims get their digits swapped in place."></textarea>
       <div class="controls">
         <button id="run-btn">Run test</button>
         <button id="reroll-btn" class="secondary" disabled>Re-mutate</button>
@@ -302,13 +389,15 @@ const HTML_ASSET = `<!DOCTYPE html>
     <div class="cell">Frames <b id="m-frames">—</b></div>
     <div class="cell">Frame density % <b id="m-fdens">—</b></div>
   </div>
+  <div class="byclass" id="m-byclass"></div>
   <div class="stamp" id="verdict" hidden></div>
 
   <footer>
-    Detection is heuristic (suffix and notation patterns) and will misfire on
-    ordinary prose containing latinate pairs. The verdict is a prior. The test
-    is your own read of the proof: if each re-mutation argues as well as the
-    original, the marked terms carried no semantic load.
+    Detection is heuristic (suffix, notation, Title-Case, and numeric-claim
+    patterns) and will misfire on ordinary prose — including real proper nouns
+    and honest statistics. The verdict is a prior. The test is your own read of
+    the proof: if each re-mutation argues as well as the original, the marked
+    terms — and the swapped numbers — carried no semantic load.
   </footer>
 </div>
 
@@ -355,6 +444,11 @@ const HTML_ASSET = `<!DOCTYPE html>
       setMetric('m-sdens', data.metrics.subDensity);
       setMetric('m-frames', data.metrics.frames);
       setMetric('m-fdens', data.metrics.frameDensity);
+
+      var byClass = data.metrics.byClass || {};
+      setMetric('m-byclass', Object.keys(byClass).map(function(k){
+        return k + ' ' + byClass[k];
+      }).join(' · '));
 
       verdict.hidden = false;
       verdict.textContent = data.verdict;

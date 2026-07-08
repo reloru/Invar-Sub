@@ -1,6 +1,6 @@
 {
   "name": "invar-sub",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Substitution Invariance Test — a single-file, zero-dependency Cloudflare Worker",
   "type": "module",
