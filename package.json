@@ -1,0 +1,15 @@
+{
+  "name": "invar-sub",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Substitution Invariance Test — a single-file, zero-dependency Cloudflare Worker",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test/smoke.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
