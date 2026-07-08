@@ -217,33 +217,51 @@ function swapDigits(match, seed, start) {
   return out;
 }
 
+// Several distinct pool picks per span, identity excluded — one plausible
+// swap is invisible, but a fan of alternatives lets the reader see that the
+// text cannot adjudicate between them.
+function poolAlternates(pool, match, seed, start, want) {
+  const alts = [];
+  const idx = hash32(`${seed}:${match}:${start}`) % pool.length;
+  for (let step = 0; step < pool.length && alts.length < want; step++) {
+    const cand = pool[(idx + step) % pool.length];
+    if (cand.toLowerCase() !== match.toLowerCase() && !alts.includes(cand)) alts.push(cand);
+  }
+  return alts;
+}
+
+function quantityAlternates(match, seed, start, want) {
+  const alts = [];
+  for (let salt = 0; alts.length < want && salt < 12; salt++) {
+    const cand = swapDigits(match, `${seed}.${salt}`, start);
+    if (cand !== match && !alts.includes(cand)) alts.push(cand);
+  }
+  return alts;
+}
+
 function mutate(text, seed) {
   const spans = collectSpans(text);
   const byClass = {};
   for (const d of DETECTORS) byClass[d.cls] = 0;
+  const swaps = [];
   let out = "";
   let pos = 0;
   for (const s of spans) {
     byClass[s.cls]++;
-    let replacement;
-    if (s.cls === "quantity") {
-      replacement = swapDigits(s.match, seed, s.start);
-    } else {
-      const pool = POOLS[s.cls];
-      let idx = hash32(`${seed}:${s.match}:${s.start}`) % pool.length;
-      // An identity swap is not a test; advance to the next pool entry.
-      if (pool[idx].toLowerCase() === s.match.toLowerCase()) idx = (idx + 1) % pool.length;
-      replacement = pool[idx];
-    }
-    out += text.slice(pos, s.start) + "⟦" + replacement + "⟧";
+    const alternates =
+      s.cls === "quantity"
+        ? quantityAlternates(s.match, seed, s.start, 3)
+        : poolAlternates(POOLS[s.cls], s.match, seed, s.start, 3);
+    swaps.push({ original: s.match, cls: s.cls, alternates });
+    out += text.slice(pos, s.start) + "⟦" + alternates[0] + "⟧";
     pos = s.end;
   }
   out += text.slice(pos);
-  return { mutatedText: out, substitutions: spans.length, byClass };
+  return { mutatedText: out, substitutions: spans.length, byClass, swaps };
 }
 
 function analyze(text, seed) {
-  const { mutatedText, substitutions, byClass } = mutate(text, seed);
+  const { mutatedText, substitutions, byClass, swaps } = mutate(text, seed);
 
   let frames = 0;
   for (const f of FRAMES) {
@@ -263,28 +281,35 @@ function analyze(text, seed) {
   const effSubs = conceptual >= 2 ? substitutions : conceptual;
   const effDensity = (effSubs / tokens) * 100;
 
-  // Density thresholds carry absolute floors so short snippets can't reach
-  // a verdict on denominator luck alone.
-  let verdict;
-  if (substitutions === 0 && frames === 0) {
-    verdict = "NO APPARATUS DETECTED";
-  } else if (effDensity >= 2 && frameDensity >= 1 && effSubs >= 5 && frames >= 3) {
-    verdict = "HIGH: DENSE APPARATUS + FRAMING RHETORIC";
-  } else if ((effDensity >= 2 && effSubs >= 4) || (frameDensity >= 1.5 && frames >= 3)) {
-    verdict = "ELEVATED: ONE SIGNAL HIGH";
-  } else {
-    verdict = "LOW / CONTENT-DEPENDENT";
-  }
+  // Each signal is graded separately, with absolute floors so short snippets
+  // can't reach a level on denominator luck alone. The tool reports priors;
+  // whether the argument actually depends on its terms is the reader's call,
+  // which is why argumentDependence is always UNKNOWN.
+  const apparatus =
+    substitutions === 0 ? "NONE"
+    : effDensity >= 2 && effSubs >= 5 ? "HIGH"
+    : effDensity >= 1 && effSubs >= 3 ? "MODERATE"
+    : "LOW";
+  const framing =
+    frames === 0 ? "NONE"
+    : frameDensity >= 1.5 && frames >= 3 ? "HIGH"
+    : frameDensity >= 0.75 && frames >= 2 ? "MODERATE"
+    : "LOW";
 
   return {
     seed,
     mutatedText,
+    swaps,
     metrics: { tokens, substitutions, subDensity, frames, frameDensity, byClass },
-    verdict,
-    note:
-      "The verdict is a prior, not a proof. The test is the mutation itself: " +
-      "if successive mutations argue as convincingly as the original, the " +
-      "substituted terms carried no semantic load.",
+    assessment: {
+      apparatus,
+      framing,
+      argumentDependence: "UNKNOWN",
+      recommendation:
+        "Read the mutated proof before trusting the original. Cycle each " +
+        "correction: if every alternative argues as well, the term carried " +
+        "no load.",
+    },
   };
 }
 
@@ -327,8 +352,10 @@ const HTML_ASSET = `<!DOCTYPE html>
   .proof{overflow-y:auto;max-height:480px;white-space:pre-wrap;color:var(--dim)}
   .proof mark{
     background:transparent;color:var(--mark);font-weight:bold;
-    border-bottom:2px solid var(--mark);padding:0 1px;
+    border-bottom:2px solid var(--mark);padding:0 1px;cursor:pointer;
   }
+  .proof mark.orig{color:var(--pass);border-bottom-color:var(--pass)}
+  .proof mark:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
   .controls{margin-top:.8rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
   button{
     background:var(--ink);color:var(--paper);border:1px solid var(--ink);
@@ -364,7 +391,7 @@ const HTML_ASSET = `<!DOCTYPE html>
 <div class="sheet">
   <header>
     <h1>Substitution Invariance Test</h1>
-    <small>v2.1 — class-preserving mutation of technical and pseudo-technical apparatus, edge-executed</small>
+    <small>v2.2 — class-preserving mutation of technical and pseudo-technical apparatus, edge-executed, reader-scored</small>
   </header>
 
   <div class="grid">
@@ -379,7 +406,7 @@ const HTML_ASSET = `<!DOCTYPE html>
       </div>
     </section>
     <section>
-      <label for="proof">Mutated proof</label>
+      <label for="proof">Mutated proof — tap a correction to cycle alternatives</label>
       <div id="proof" class="proof">Awaiting typescript.</div>
     </section>
   </div>
@@ -393,13 +420,15 @@ const HTML_ASSET = `<!DOCTYPE html>
   </div>
   <div class="byclass" id="m-byclass"></div>
   <div class="stamp" id="verdict" hidden></div>
+  <div class="byclass" id="rec"></div>
 
   <footer>
     Detection is heuristic (suffix, notation, Title-Case, and numeric-claim
     patterns) and will misfire on ordinary prose — including real proper nouns
-    and honest statistics. The verdict is a prior. The test is your own read of
-    the proof: if each re-mutation argues as well as the original, the marked
-    terms — and the swapped numbers — carried no semantic load.
+    and honest statistics. The levels are priors, not verdicts. The test is
+    your own read of the proof: tap any correction to cycle same-class
+    alternatives — the author's original shows in green — and if every version
+    argues as well as every other, the marked terms carried no semantic load.
   </footer>
 </div>
 
@@ -411,7 +440,27 @@ const HTML_ASSET = `<!DOCTYPE html>
   var rerollBtn = document.getElementById('reroll-btn');
   var seedLabel = document.getElementById('seed-label');
   var verdict = document.getElementById('verdict');
+  var rec = document.getElementById('rec');
   var seed = 0;
+  var cycles = [];
+
+  function cycleMark(el) {
+    var i = +el.dataset.i;
+    if (!cycles[i]) return;
+    var pos = ((+el.dataset.pos || 0) + 1) % cycles[i].length;
+    el.dataset.pos = pos;
+    el.textContent = cycles[i][pos];
+    // Last entry in the cycle is the author's original.
+    el.classList.toggle('orig', pos === cycles[i].length - 1);
+  }
+  proof.addEventListener('click', function(e){
+    if (e.target.tagName === 'MARK') cycleMark(e.target);
+  });
+  proof.addEventListener('keydown', function(e){
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.tagName === 'MARK') {
+      e.preventDefault(); cycleMark(e.target);
+    }
+  });
 
   function esc(s){
     return s.replace(/[&<>]/g, function(c){
@@ -437,9 +486,16 @@ const HTML_ASSET = `<!DOCTYPE html>
 
       // Escape first, then promote markers to highlight spans. User content
       // never reaches innerHTML unescaped; marker chars are stripped server-side.
+      // Marks are numbered in document order, which matches the swaps array.
+      var n = 0;
       proof.innerHTML = esc(data.mutatedText)
-        .replace(/⟦([^⟧]*)⟧/g, '<mark>$1</mark>');
+        .replace(/⟦([^⟧]*)⟧/g, function(_, t){
+          return '<mark tabindex="0" data-i="' + (n++) + '">' + t + '</mark>';
+        });
       proof.style.color = 'var(--ink)';
+      cycles = (data.swaps || []).map(function(s){
+        return s.alternates.concat([s.original]);
+      });
 
       setMetric('m-tokens', data.metrics.tokens);
       setMetric('m-subs', data.metrics.substitutions);
@@ -457,9 +513,11 @@ const HTML_ASSET = `<!DOCTYPE html>
         return (CLASS_LABELS[k] || k) + ' ' + byClass[k];
       }).join(' · '));
 
+      var a = data.assessment;
       verdict.hidden = false;
-      verdict.textContent = data.verdict;
-      verdict.className = /^(HIGH|ELEVATED)/.test(data.verdict) ? 'stamp hot' : 'stamp';
+      verdict.textContent = 'APPARATUS: ' + a.apparatus + ' · FRAMING: ' + a.framing;
+      verdict.className = (a.apparatus === 'HIGH' || a.framing === 'HIGH') ? 'stamp hot' : 'stamp';
+      rec.textContent = 'Argument dependence: ' + a.argumentDependence.toLowerCase() + ' — ' + a.recommendation;
 
       seedLabel.textContent = 'seed ' + data.seed;
       rerollBtn.disabled = false;

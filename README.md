@@ -33,9 +33,14 @@ terms carried no semantic load.
 | `/` | `POST` | `{ "text": string, "seed": number? }` → JSON analysis |
 
 The response includes the mutated text (substitutions wrapped in `⟦…⟧`
-markers), token/substitution/frame metrics, and a verdict. Re-posting with an
-incremented `seed` produces a different deterministic mutation. Input is
-capped at 60,000 characters.
+markers), a `swaps` array giving each mark's same-class alternatives,
+token/substitution/frame metrics, and an `assessment` — apparatus and framing
+levels (NONE/LOW/MODERATE/HIGH) plus a recommendation. Argument dependence is
+always reported `UNKNOWN`: the tool reports priors, and only a reader can
+score whether the argument survived. In the UI, tap any correction to cycle
+through its alternatives and back to the author's original (shown in green).
+Re-posting with an incremented `seed` produces a different deterministic
+mutation. Input is capped at 60,000 characters.
 
 ## Development
 

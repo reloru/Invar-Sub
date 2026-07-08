@@ -40,7 +40,18 @@ async function post(text, seed = 1) {
   assert.ok(data.metrics.substitutions >= 2, "apparatus terms substituted");
   assert.ok(data.metrics.frames >= 2, "framing moves counted");
   assert.match(data.mutatedText, /⟦[^⟧]+⟧/, "mutation markers present");
-  assert.ok(typeof data.verdict === "string" && data.verdict.length > 0);
+  assert.match(data.assessment.apparatus, /^(NONE|LOW|MODERATE|HIGH)$/);
+  assert.match(data.assessment.framing, /^(NONE|LOW|MODERATE|HIGH)$/);
+  assert.equal(data.assessment.argumentDependence, "UNKNOWN");
+  // One swap entry per substitution, each offering distinct non-identity
+  // alternatives, first alternative being what mutatedText shows.
+  assert.equal(data.swaps.length, data.metrics.substitutions);
+  for (const s of data.swaps) {
+    assert.ok(s.alternates.length >= 2, "multiple alternatives per span");
+    assert.ok(!s.alternates.includes(s.original), "identity excluded");
+    assert.equal(new Set(s.alternates).size, s.alternates.length, "alternates distinct");
+  }
+  assert.ok(data.mutatedText.includes("⟦" + data.swaps[0].alternates[0] + "⟧"));
 }
 
 // Pseudo-technical apparatus: coinages, neologisms, numeric claims
@@ -69,14 +80,19 @@ async function post(text, seed = 1) {
       "were rare and mild in both groups over the follow-up period."
   );
   assert.ok(data.metrics.byClass.quantity >= 2, "quantities still detected");
-  assert.match(data.verdict, /^(LOW|NO)/, `honest prose verdict was: ${data.verdict}`);
+  assert.match(
+    data.assessment.apparatus,
+    /^(NONE|LOW)$/,
+    `honest prose apparatus level was: ${data.assessment.apparatus}`
+  );
 }
 
 // Regression: the ROARM nonsense paper must score HIGH (it scored LOW in v2.0)
 {
   const text = await readFile(new URL("./fixtures/roarm.txt", import.meta.url), "utf8");
   const data = await post(text);
-  assert.match(data.verdict, /^HIGH/, `ROARM verdict was: ${data.verdict}`);
+  assert.equal(data.assessment.apparatus, "HIGH", "ROARM apparatus level");
+  assert.equal(data.assessment.framing, "HIGH", "ROARM framing level");
   assert.ok(data.metrics.substitutions >= 10, "dense apparatus flagged");
   assert.ok(data.metrics.frames >= 5, "boilerplate framing flagged");
   // “lectro-memes.” — period inside the closing quote must not block detection.
