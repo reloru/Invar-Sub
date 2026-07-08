@@ -81,6 +81,10 @@ async function post(text, seed = 1) {
   assert.ok(data.metrics.frames >= 5, "boilerplate framing flagged");
   // “lectro-memes.” — period inside the closing quote must not block detection.
   assert.ok(data.metrics.byClass.neologism >= 1, "quoted neologism with inner period");
+  // Title Case runs must not span line breaks: the coinage swap at the end of
+  // the title/Conclusion lines must leave the next line's heading intact.
+  assert.match(data.mutatedText, /\n\s*Abstract:/, "Abstract heading survives");
+  assert.match(data.mutatedText, /\nConclusion\n/, "Conclusion heading survives");
 }
 
 // POST with bad payloads

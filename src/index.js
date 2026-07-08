@@ -85,10 +85,12 @@ const DETECTORS = [
     cls: "coinage",
     // Title Case runs of 3+ words: named models, frameworks, instruments
     // ("Pneumatic Thought Calibrator"). Leading articles/pronouns excluded
-    // so ordinary sentence openings don't match. Will fire on real proper
-    // nouns of 3+ words — an accepted misfire for the target domain.
+    // so ordinary sentence openings don't match; words join only across
+    // horizontal whitespace so a run can't swallow a heading on the next
+    // line. Will fire on real proper nouns of 3+ words — an accepted
+    // misfire for the target domain.
     regex:
-      /\b(?!(?:The|A|An|In|On|At|It|We|This|That|These|Those|Our|If|As|For|But|And|Or|To|By)\b)[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*(?:\s+[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*){2,5}\b/g,
+      /\b(?!(?:The|A|An|In|On|At|It|We|This|That|These|Those|Our|If|As|For|But|And|Or|To|By)\b)[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*(?:[ \t]+[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*){2,5}\b/g,
   },
   {
     cls: "neologism",
