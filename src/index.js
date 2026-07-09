@@ -81,6 +81,32 @@ const DETECTORS = [
     // Single technical tokens that carry apparatus weight on their own.
     regex: /\beigen[a-z]+\b|\bcohomolog[a-z]*\b|\bfunctorial\b|\bmonoidal\b/gi,
   },
+  {
+    cls: "coinage",
+    // Title Case runs of 3+ words: named models, frameworks, instruments
+    // ("Pneumatic Thought Calibrator"). Leading articles/pronouns excluded
+    // so ordinary sentence openings don't match; words join only across
+    // horizontal whitespace so a run can't swallow a heading on the next
+    // line. Will fire on real proper nouns of 3+ words — an accepted
+    // misfire for the target domain.
+    regex:
+      /\b(?!(?:The|A|An|In|On|At|It|We|This|That|These|Those|Our|If|As|For|But|And|Or|To|By)\b)[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*(?:[ \t]+[A-Z][a-z]+(?:-[A-Z]?[a-z]+)*){2,5}\b/g,
+  },
+  {
+    cls: "neologism",
+    // Quoted lowercase hyphenated coinages: “lectro-memes”. Quotes and any
+    // American-style trailing punctuation (“lectro-memes.”) stay outside the
+    // span so substitution preserves them.
+    regex: /(?<=[“"'‘])[a-z]+(?:-[a-z]+)+(?=[.,;:!?]?[”"'’])/g,
+  },
+  {
+    cls: "quantity",
+    // Numeric claims: percentages, factors, sample sizes. Not pooled —
+    // digits are swapped in place with format preserved, so "82%" mutates
+    // to another percentage and "47.3 participants" to another decimal count.
+    regex:
+      /\b\d+(?:\.\d+)?\s*(?:%|percent\b)|\bfactors?\s+of\s+\d+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\s+(?:participants|subjects|respondents|patients|trials|samples|observations)\b/gi,
+  },
 ];
 
 const POOLS = {
@@ -102,6 +128,16 @@ const POOLS = {
     "topological closure", "variational manifold", "categorical fibration",
     "asymptotic regularization",
   ],
+  coinage: [
+    "Ontological Drift Assembly", "Recursive Sentiment Lattice",
+    "Harmonic Cognition Registry", "Distributed Epistemic Turbine",
+    "Modular Inference Prism", "Sequential Abstraction Chamber",
+    "Parametric Insight Manifold", "Fractal Attention Compass",
+  ],
+  neologism: [
+    "chrono-glyphs", "psycho-lattices", "flux-tokens",
+    "meta-spores", "gravito-memes", "somno-vectors",
+  ],
 };
 
 // Rhetorical framing moves. Bounded patterns — no unanchored `.*?`, and no
@@ -115,6 +151,15 @@ const FRAMES = [
   /\bunder\s+(?:that|this)\s+assumption\b/gi,
   /\bthis\s+is\s+(?:exactly|precisely)\s+(?:what|why|how|the)\b/gi,
   /\bwhat(?:'s| is)\s+(?:really|actually)\s+(?:happening|going on|at stake)\b/gi,
+  // Academic boilerplate: authority moves that assert significance without
+  // carrying evidence. A distinct family from the argumentative frames above.
+  /\bstatistically\s+significant\b/gi,
+  /\bgroundbreaking\s+(?:perspective|approach|framework|study|insight|finding)s?\b/gi,
+  /\bchallenges?\s+conventional\s+(?:assumptions|wisdom|thinking|models)\b/gi,
+  /\bfuture\s+(?:research|investigations?|studies|work)\s+(?:should|will|must|could|may)\b/gi,
+  /\bpromising\s+(?:foundation|avenue|direction)s?\b/gi,
+  /\bexpands?\s+upon\s+previous\s+\w+/gi,
+  /\bincreasingly\s+focused\s+on\b/gi,
 ];
 
 // DJB2-XOR kept unsigned via >>> 0 (Math.abs on a 32-bit signed hash fails at
@@ -147,24 +192,76 @@ function collectSpans(text) {
   return kept;
 }
 
+// Format-preserving digit swap: every digit is rehashed in place, run-leading
+// digits stay 1-9 so magnitudes hold ("82" can't become "07"). Non-digits
+// (decimal points, "%", "participants") pass through untouched.
+function swapDigits(match, seed, start) {
+  let runStart = true;
+  let out = "";
+  for (let i = 0; i < match.length; i++) {
+    const c = match[i];
+    if (c >= "0" && c <= "9") {
+      const h = hash32(`${seed}:${match}:${start}:${i}`);
+      out += String(runStart ? 1 + (h % 9) : h % 10);
+      runStart = false;
+    } else {
+      out += c;
+      runStart = true;
+    }
+  }
+  // An identity swap is not a test; rotate the last digit ((d % 9) + 1 never
+  // maps a digit to itself).
+  if (out === match) {
+    out = out.replace(/(\d)(?=\D*$)/, (d) => String((Number(d) % 9) + 1));
+  }
+  return out;
+}
+
+// Several distinct pool picks per span, identity excluded — one plausible
+// swap is invisible, but a fan of alternatives lets the reader see that the
+// text cannot adjudicate between them.
+function poolAlternates(pool, match, seed, start, want) {
+  const alts = [];
+  const idx = hash32(`${seed}:${match}:${start}`) % pool.length;
+  for (let step = 0; step < pool.length && alts.length < want; step++) {
+    const cand = pool[(idx + step) % pool.length];
+    if (cand.toLowerCase() !== match.toLowerCase() && !alts.includes(cand)) alts.push(cand);
+  }
+  return alts;
+}
+
+function quantityAlternates(match, seed, start, want) {
+  const alts = [];
+  for (let salt = 0; alts.length < want && salt < 12; salt++) {
+    const cand = swapDigits(match, `${seed}.${salt}`, start);
+    if (cand !== match && !alts.includes(cand)) alts.push(cand);
+  }
+  return alts;
+}
+
 function mutate(text, seed) {
   const spans = collectSpans(text);
+  const byClass = {};
+  for (const d of DETECTORS) byClass[d.cls] = 0;
+  const swaps = [];
   let out = "";
   let pos = 0;
   for (const s of spans) {
-    const pool = POOLS[s.cls];
-    let idx = hash32(`${seed}:${s.match}:${s.start}`) % pool.length;
-    // An identity swap is not a test; advance to the next pool entry.
-    if (pool[idx].toLowerCase() === s.match.toLowerCase()) idx = (idx + 1) % pool.length;
-    out += text.slice(pos, s.start) + "⟦" + pool[idx] + "⟧";
+    byClass[s.cls]++;
+    const alternates =
+      s.cls === "quantity"
+        ? quantityAlternates(s.match, seed, s.start, 3)
+        : poolAlternates(POOLS[s.cls], s.match, seed, s.start, 3);
+    swaps.push({ original: s.match, cls: s.cls, alternates });
+    out += text.slice(pos, s.start) + "⟦" + alternates[0] + "⟧";
     pos = s.end;
   }
   out += text.slice(pos);
-  return { mutatedText: out, substitutions: spans.length };
+  return { mutatedText: out, substitutions: spans.length, byClass, swaps };
 }
 
 function analyze(text, seed) {
-  const { mutatedText, substitutions } = mutate(text, seed);
+  const { mutatedText, substitutions, byClass, swaps } = mutate(text, seed);
 
   let frames = 0;
   for (const f of FRAMES) {
@@ -177,26 +274,42 @@ function analyze(text, seed) {
   const subDensity = +((substitutions / tokens) * 100).toFixed(2);
   const frameDensity = +((frames / tokens) * 100).toFixed(2);
 
-  let verdict;
-  if (substitutions === 0 && frames === 0) {
-    verdict = "NO APPARATUS DETECTED";
-  } else if (subDensity >= 2 && frameDensity >= 1) {
-    verdict = "HIGH: DENSE APPARATUS + FRAMING RHETORIC";
-  } else if (subDensity >= 2 || frameDensity >= 1.5) {
-    verdict = "ELEVATED: ONE SIGNAL HIGH";
-  } else {
-    verdict = "LOW / CONTENT-DEPENDENT";
-  }
+  // Numeric claims convict only in the company of swappable conceptual
+  // apparatus — honest results sections are full of load-bearing numbers,
+  // and numbers alone should not tip the verdict.
+  const conceptual = substitutions - byClass.quantity;
+  const effSubs = conceptual >= 2 ? substitutions : conceptual;
+  const effDensity = (effSubs / tokens) * 100;
+
+  // Each signal is graded separately, with absolute floors so short snippets
+  // can't reach a level on denominator luck alone. The tool reports priors;
+  // whether the argument actually depends on its terms is the reader's call,
+  // which is why argumentDependence is always UNKNOWN.
+  const apparatus =
+    substitutions === 0 ? "NONE"
+    : effDensity >= 2 && effSubs >= 5 ? "HIGH"
+    : effDensity >= 1 && effSubs >= 3 ? "MODERATE"
+    : "LOW";
+  const framing =
+    frames === 0 ? "NONE"
+    : frameDensity >= 1.5 && frames >= 3 ? "HIGH"
+    : frameDensity >= 0.75 && frames >= 2 ? "MODERATE"
+    : "LOW";
 
   return {
     seed,
     mutatedText,
-    metrics: { tokens, substitutions, subDensity, frames, frameDensity },
-    verdict,
-    note:
-      "The verdict is a prior, not a proof. The test is the mutation itself: " +
-      "if successive mutations argue as convincingly as the original, the " +
-      "substituted terms carried no semantic load.",
+    swaps,
+    metrics: { tokens, substitutions, subDensity, frames, frameDensity, byClass },
+    assessment: {
+      apparatus,
+      framing,
+      argumentDependence: "UNKNOWN",
+      recommendation:
+        "Read the mutated proof before trusting the original. Cycle each " +
+        "correction: if every alternative argues as well, the term carried " +
+        "no load.",
+    },
   };
 }
 
@@ -239,8 +352,10 @@ const HTML_ASSET = `<!DOCTYPE html>
   .proof{overflow-y:auto;max-height:480px;white-space:pre-wrap;color:var(--dim)}
   .proof mark{
     background:transparent;color:var(--mark);font-weight:bold;
-    border-bottom:2px solid var(--mark);padding:0 1px;
+    border-bottom:2px solid var(--mark);padding:0 1px;cursor:pointer;
   }
+  .proof mark.orig{color:var(--pass);border-bottom-color:var(--pass)}
+  .proof mark:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
   .controls{margin-top:.8rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
   button{
     background:var(--ink);color:var(--paper);border:1px solid var(--ink);
@@ -264,6 +379,7 @@ const HTML_ASSET = `<!DOCTYPE html>
     letter-spacing:.1em;transform:rotate(-1.2deg);
   }
   .stamp.hot{border-color:var(--mark);color:var(--mark)}
+  .byclass{margin-top:.6rem;color:var(--dim);font-size:.8rem;letter-spacing:.04em}
   footer{margin-top:1.6rem;color:var(--dim);font-size:.78rem;max-width:70ch}
   @media(prefers-reduced-motion:no-preference){
     .stamp{transition:transform .12s ease}
@@ -275,14 +391,14 @@ const HTML_ASSET = `<!DOCTYPE html>
 <div class="sheet">
   <header>
     <h1>Substitution Invariance Test</h1>
-    <small>v2.0 — class-preserving mutation of technical apparatus, edge-executed</small>
+    <small>v2.2 — class-preserving mutation of technical and pseudo-technical apparatus, edge-executed, reader-scored</small>
   </header>
 
   <div class="grid">
     <section>
       <label for="input-text">Typescript under examination</label>
       <textarea id="input-text" spellcheck="false"
-        placeholder="Paste prose whose rigor you suspect is decorative. Notation, eponyms, and latinate term-pairs will be swapped for arbitrary same-class terms."></textarea>
+        placeholder="Paste prose whose rigor you suspect is decorative. Notation, eponyms, latinate term-pairs, Title-Case coinages, and quoted neologisms are swapped for arbitrary same-class terms; numeric claims get their digits swapped in place."></textarea>
       <div class="controls">
         <button id="run-btn">Run test</button>
         <button id="reroll-btn" class="secondary" disabled>Re-mutate</button>
@@ -290,7 +406,7 @@ const HTML_ASSET = `<!DOCTYPE html>
       </div>
     </section>
     <section>
-      <label for="proof">Mutated proof</label>
+      <label for="proof">Mutated proof — tap a correction to cycle alternatives</label>
       <div id="proof" class="proof">Awaiting typescript.</div>
     </section>
   </div>
@@ -302,13 +418,17 @@ const HTML_ASSET = `<!DOCTYPE html>
     <div class="cell">Frames <b id="m-frames">—</b></div>
     <div class="cell">Frame density % <b id="m-fdens">—</b></div>
   </div>
+  <div class="byclass" id="m-byclass"></div>
   <div class="stamp" id="verdict" hidden></div>
+  <div class="byclass" id="rec"></div>
 
   <footer>
-    Detection is heuristic (suffix and notation patterns) and will misfire on
-    ordinary prose containing latinate pairs. The verdict is a prior. The test
-    is your own read of the proof: if each re-mutation argues as well as the
-    original, the marked terms carried no semantic load.
+    Detection is heuristic (suffix, notation, Title-Case, and numeric-claim
+    patterns) and will misfire on ordinary prose — including real proper nouns
+    and honest statistics. The levels are priors, not verdicts. The test is
+    your own read of the proof: tap any correction to cycle same-class
+    alternatives — the author's original shows in green — and if every version
+    argues as well as every other, the marked terms carried no semantic load.
   </footer>
 </div>
 
@@ -320,7 +440,27 @@ const HTML_ASSET = `<!DOCTYPE html>
   var rerollBtn = document.getElementById('reroll-btn');
   var seedLabel = document.getElementById('seed-label');
   var verdict = document.getElementById('verdict');
+  var rec = document.getElementById('rec');
   var seed = 0;
+  var cycles = [];
+
+  function cycleMark(el) {
+    var i = +el.dataset.i;
+    if (!cycles[i]) return;
+    var pos = ((+el.dataset.pos || 0) + 1) % cycles[i].length;
+    el.dataset.pos = pos;
+    el.textContent = cycles[i][pos];
+    // Last entry in the cycle is the author's original.
+    el.classList.toggle('orig', pos === cycles[i].length - 1);
+  }
+  proof.addEventListener('click', function(e){
+    if (e.target.tagName === 'MARK') cycleMark(e.target);
+  });
+  proof.addEventListener('keydown', function(e){
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.tagName === 'MARK') {
+      e.preventDefault(); cycleMark(e.target);
+    }
+  });
 
   function esc(s){
     return s.replace(/[&<>]/g, function(c){
@@ -346,9 +486,16 @@ const HTML_ASSET = `<!DOCTYPE html>
 
       // Escape first, then promote markers to highlight spans. User content
       // never reaches innerHTML unescaped; marker chars are stripped server-side.
+      // Marks are numbered in document order, which matches the swaps array.
+      var n = 0;
       proof.innerHTML = esc(data.mutatedText)
-        .replace(/⟦([^⟧]*)⟧/g, '<mark>$1</mark>');
+        .replace(/⟦([^⟧]*)⟧/g, function(_, t){
+          return '<mark tabindex="0" data-i="' + (n++) + '">' + t + '</mark>';
+        });
       proof.style.color = 'var(--ink)';
+      cycles = (data.swaps || []).map(function(s){
+        return s.alternates.concat([s.original]);
+      });
 
       setMetric('m-tokens', data.metrics.tokens);
       setMetric('m-subs', data.metrics.substitutions);
@@ -356,9 +503,21 @@ const HTML_ASSET = `<!DOCTYPE html>
       setMetric('m-frames', data.metrics.frames);
       setMetric('m-fdens', data.metrics.frameDensity);
 
+      var CLASS_LABELS = {
+        notation: 'notation', eponymPair: 'eponyms', jargonPair: 'jargon pairs',
+        standalone: 'standalone terms', coinage: 'coinages',
+        neologism: 'neologisms', quantity: 'numeric claims'
+      };
+      var byClass = data.metrics.byClass || {};
+      setMetric('m-byclass', Object.keys(byClass).map(function(k){
+        return (CLASS_LABELS[k] || k) + ' ' + byClass[k];
+      }).join(' · '));
+
+      var a = data.assessment;
       verdict.hidden = false;
-      verdict.textContent = data.verdict;
-      verdict.className = /^(HIGH|ELEVATED)/.test(data.verdict) ? 'stamp hot' : 'stamp';
+      verdict.textContent = 'APPARATUS: ' + a.apparatus + ' · FRAMING: ' + a.framing;
+      verdict.className = (a.apparatus === 'HIGH' || a.framing === 'HIGH') ? 'stamp hot' : 'stamp';
+      rec.textContent = 'Argument dependence: ' + a.argumentDependence.toLowerCase() + ' — ' + a.recommendation;
 
       seedLabel.textContent = 'seed ' + data.seed;
       rerollBtn.disabled = false;

@@ -6,11 +6,20 @@ decorative rigor.
 **Principle:** if a technical term can be swapped for an arbitrary same-class
 term and the surrounding argument reads equally well, the term carried no
 semantic load. The worker detects candidate terms (notation, eponymous pairs,
-latinate jargon pairs, standalone apparatus words), performs deterministic
-class-preserving substitutions, and reports two independent signals:
+latinate jargon pairs, standalone apparatus words, Title-Case coinages like
+"Pneumatic Thought Calibrator", quoted neologisms like "lectro-memes"),
+performs deterministic class-preserving substitutions, and reports two
+independent signals:
 
 1. **Substitution density** — how much of the text is swappable apparatus
 2. **Frame density** — rhetorical framing moves per token
+
+Numeric claims (percentages, factors, sample sizes) get their digits swapped
+in place, format preserved — if "82% more" survives becoming "58% more", the
+number was decoration. Because honest results sections are full of
+load-bearing numbers, quantities only count toward the verdict when they
+appear alongside swappable conceptual apparatus, and verdict thresholds carry
+absolute floors so short snippets can't score on density alone.
 
 The verdict is a prior, not a proof. The real test is your own read of the
 mutated output: if each re-mutation argues as well as the original, the marked
@@ -24,9 +33,14 @@ terms carried no semantic load.
 | `/` | `POST` | `{ "text": string, "seed": number? }` → JSON analysis |
 
 The response includes the mutated text (substitutions wrapped in `⟦…⟧`
-markers), token/substitution/frame metrics, and a verdict. Re-posting with an
-incremented `seed` produces a different deterministic mutation. Input is
-capped at 60,000 characters.
+markers), a `swaps` array giving each mark's same-class alternatives,
+token/substitution/frame metrics, and an `assessment` — apparatus and framing
+levels (NONE/LOW/MODERATE/HIGH) plus a recommendation. Argument dependence is
+always reported `UNKNOWN`: the tool reports priors, and only a reader can
+score whether the argument survived. In the UI, tap any correction to cycle
+through its alternatives and back to the author's original (shown in green).
+Re-posting with an incremented `seed` produces a different deterministic
+mutation. Input is capped at 60,000 characters.
 
 ## Development
 
