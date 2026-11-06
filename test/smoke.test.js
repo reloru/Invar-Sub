@@ -28,6 +28,10 @@ async function post(text, seed = 1) {
   assert.match(res.headers.get("content-type"), /text\/html/);
   const html = await res.text();
   assert.match(html, /Substitution Invariance Test/);
+  // The UI script lives inside a JS template literal, where escapes like \'
+  // silently collapse; make sure what the browser receives still parses.
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  assert.doesNotThrow(() => new Function(script), "inline UI script parses");
 }
 
 // POST analyzes text and mutates detected apparatus
@@ -114,6 +118,59 @@ async function post(text, seed = 1) {
     new Request(url, { method: "POST", body: "not json" })
   );
   assert.equal(notJson.status, 400);
+}
+
+// POST /score — model-judged invariance, with a mocked Workers AI binding
+{
+  const text =
+    "The Pneumatic Thought Calibrator showed that the stochastic gradient of " +
+    "the Gaussian distribution yields 82% more synthetic imagination.";
+  const scoreReq = () =>
+    new Request("http://localhost/score", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+  // Judge: `orig` for the untouched text, `mut` for anything mutated.
+  const judge = (orig, mut, calls = []) => ({
+    async run(model, input) {
+      calls.push({ model, input });
+      return { answers: { coherent: { type: "noul", noul: input.state === text ? orig : mut } } };
+    },
+  });
+
+  const cases = [
+    [0.9, 0.1, "LOAD-BEARING"],
+    [0.85, 0.8, "DECORATIVE"],
+    [0.05, 0.04, "INCOHERENT BEFORE SUBSTITUTION"],
+  ];
+  for (const [orig, mut, reading] of cases) {
+    const calls = [];
+    const res = await worker.fetch(scoreReq(), { AI: judge(orig, mut, calls) });
+    assert.equal(res.status, 200);
+    const d = await res.json();
+    assert.equal(d.reading, reading, `orig ${orig} / mut ${mut}`);
+    assert.equal(d.mutations.length, 3, "three mutations judged");
+    assert.equal(calls.length, 4, "original + three mutations sent to the model");
+    assert.equal(calls[0].model, "@cf/cloudflare/clef");
+    for (const c of calls) assert.doesNotMatch(c.input.state, /[⟦⟧]/, "markers stripped before judging");
+  }
+
+  // Nothing detected → no model calls at all.
+  const calls = [];
+  const plain = await worker.fetch(
+    new Request("http://localhost/score", {
+      method: "POST",
+      body: JSON.stringify({ text: "I walked to the store and bought bread." }),
+    }),
+    { AI: judge(0.9, 0.9, calls) }
+  );
+  assert.equal((await plain.json()).reading, "NOTHING TO SUBSTITUTE");
+  assert.equal(calls.length, 0);
+
+  // No binding → 501; model failure → 502.
+  assert.equal((await worker.fetch(scoreReq())).status, 501);
+  const broken = { async run() { throw new Error("boom"); } };
+  assert.equal((await worker.fetch(scoreReq(), { AI: broken })).status, 502);
 }
 
 // Other methods rejected

@@ -8,12 +8,18 @@
  *   1. substitution density  — how much of the text is swappable apparatus
  *   2. frame density         — rhetorical framing moves per token
  *
- * POST /  { text: string, seed?: number }  →  JSON analysis
+ * Optionally, a third signal from a model judge (Workers AI, Clef):
+ *   3. coherence under substitution — the original and several mutations are
+ *      scored for coherence; a collapse means the terms were load-bearing,
+ *      no change means they weren't.
+ *
+ * POST /       { text: string, seed?: number }  →  JSON analysis
+ * POST /score  { text: string }                 →  model-judged invariance
  * GET  /  →  UI
  */
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
     if (request.method === "GET") {
       return new Response(HTML_ASSET, {
         headers: { "content-type": "text/html; charset=utf-8" },
@@ -28,13 +34,22 @@ export default {
         return json({ error: "Body must be JSON: { text, seed? }" }, 400);
       }
       const raw = typeof body.text === "string" ? body.text : "";
-      if (!raw.trim()) return json({ error: "Empty text payload" }, 400);
-      if (raw.length > 60_000) return json({ error: "Text exceeds 60,000 characters" }, 413);
+      if (!raw.trim()) return json({ error: "Paste some text first" }, 400);
+      if (raw.length > 60_000) return json({ error: "Text is too long (60,000 character limit)" }, 413);
 
-      const seed = Number.isInteger(body.seed) ? body.seed : 0;
       // Strip marker characters so input cannot forge highlight spans downstream.
       const text = raw.replace(/[⟦⟧]/g, "");
 
+      if (new URL(request.url).pathname === "/score") {
+        if (!env.AI) return json({ error: "AI check isn't available here" }, 501);
+        try {
+          return json(await score(text, env.AI));
+        } catch (err) {
+          return json({ error: "AI check failed: " + (err && err.message || err) }, 502);
+        }
+      }
+
+      const seed = Number.isInteger(body.seed) ? body.seed : 0;
       return json(analyze(text, seed));
     }
 
@@ -306,10 +321,71 @@ function analyze(text, seed) {
       framing,
       argumentDependence: "UNKNOWN",
       recommendation:
-        "Read the mutated proof before trusting the original. Cycle each " +
-        "correction: if every alternative argues as well, the term carried " +
-        "no load.",
+        "If the swapped text sounds just as convincing, the original " +
+        "terms weren't doing any work.",
     },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Model-judged invariance (Workers AI, Clef)                         */
+/* ------------------------------------------------------------------ */
+
+const SCORE_SEEDS = [0, 1, 2];
+const CLEF_QUESTIONS = {
+  coherent: {
+    type: "noul",
+    instructions:
+      "Does this passage make a coherent, internally consistent argument in " +
+      "which each technical term fits what is claimed about it?",
+  },
+};
+
+async function judgeCoherence(ai, state) {
+  const res = await ai.run("@cf/cloudflare/clef", {
+    model: "clef",
+    state,
+    questions: CLEF_QUESTIONS,
+  });
+  const p = res && res.answers && res.answers.coherent && res.answers.coherent.noul;
+  if (typeof p !== "number") throw new Error("unexpected Clef response");
+  return p;
+}
+
+// The judge scores the original and several mutations with identical
+// questions. Invariance is read from the change, not from any single score:
+// a coherent original whose mutations collapse had load-bearing terms; a
+// coherent original that survives substitution had decorative ones; an
+// incoherent original has no argument for its terms to carry.
+async function score(text, ai) {
+  const mutations = SCORE_SEEDS.map((s) => {
+    const { mutatedText, substitutions } = mutate(text, s);
+    return { seed: s, text: mutatedText.replace(/[⟦⟧]/g, ""), substitutions };
+  });
+  if (mutations[0].substitutions === 0) {
+    return { reading: "NOTHING TO SUBSTITUTE", original: null, mutations: [], coherenceLost: null };
+  }
+
+  const [original, ...mutated] = await Promise.all([
+    judgeCoherence(ai, text),
+    ...mutations.map((m) => judgeCoherence(ai, m.text)),
+  ]);
+  const meanMutated = mutated.reduce((a, b) => a + b, 0) / mutated.length;
+  const coherenceLost = Math.max(0, original - meanMutated);
+
+  const reading =
+    original < 0.5 ? "INCOHERENT BEFORE SUBSTITUTION"
+    : coherenceLost >= 0.3 ? "LOAD-BEARING"
+    : "DECORATIVE";
+
+  const r4 = (x) => +x.toFixed(4);
+  return {
+    reading,
+    original: r4(original),
+    mutations: mutations.map((m, i) => ({ seed: m.seed, coherence: r4(mutated[i]) })),
+    coherenceLost: r4(coherenceLost),
+    note:
+      "AI can be fooled by fluent nonsense too.",
   };
 }
 
@@ -380,6 +456,7 @@ const HTML_ASSET = `<!DOCTYPE html>
   }
   .stamp.hot{border-color:var(--mark);color:var(--mark)}
   .byclass{margin-top:.6rem;color:var(--dim);font-size:.8rem;letter-spacing:.04em}
+  .ai{margin-top:1.6rem;border-top:3px double var(--ink);padding-top:1rem}
   footer{margin-top:1.6rem;color:var(--dim);font-size:.78rem;max-width:70ch}
   @media(prefers-reduced-motion:no-preference){
     .stamp{transition:transform .12s ease}
@@ -391,44 +468,54 @@ const HTML_ASSET = `<!DOCTYPE html>
 <div class="sheet">
   <header>
     <h1>Substitution Invariance Test</h1>
-    <small>v2.2 — class-preserving mutation of technical and pseudo-technical apparatus, edge-executed, reader-scored</small>
+    <small>v2.3 — swaps technical terms to see if the argument still holds</small>
   </header>
 
   <div class="grid">
     <section>
-      <label for="input-text">Typescript under examination</label>
+      <label for="input-text">Text to test</label>
       <textarea id="input-text" spellcheck="false"
-        placeholder="Paste prose whose rigor you suspect is decorative. Notation, eponyms, latinate term-pairs, Title-Case coinages, and quoted neologisms are swapped for arbitrary same-class terms; numeric claims get their digits swapped in place."></textarea>
+        placeholder="Paste text here. Technical terms and numbers get swapped for random look-alikes."></textarea>
       <div class="controls">
         <button id="run-btn">Run test</button>
-        <button id="reroll-btn" class="secondary" disabled>Re-mutate</button>
+        <button id="reroll-btn" class="secondary" disabled>Reshuffle</button>
+        <button id="ai-btn" class="secondary" disabled>Score with AI</button>
         <span class="seed" id="seed-label"></span>
       </div>
     </section>
     <section>
-      <label for="proof">Mutated proof — tap a correction to cycle alternatives</label>
-      <div id="proof" class="proof">Awaiting typescript.</div>
+      <label for="proof">Swapped text — tap a red word to cycle options</label>
+      <div id="proof" class="proof">Results appear here.</div>
     </section>
   </div>
 
   <div class="ledger">
-    <div class="cell">Tokens <b id="m-tokens">—</b></div>
-    <div class="cell">Substitutions <b id="m-subs">—</b></div>
-    <div class="cell">Sub. density % <b id="m-sdens">—</b></div>
-    <div class="cell">Frames <b id="m-frames">—</b></div>
-    <div class="cell">Frame density % <b id="m-fdens">—</b></div>
+    <div class="cell">Words <b id="m-tokens">—</b></div>
+    <div class="cell">Swaps <b id="m-subs">—</b></div>
+    <div class="cell">Swaps per 100 words <b id="m-sdens">—</b></div>
+    <div class="cell">Stock phrases <b id="m-frames">—</b></div>
+    <div class="cell">Stock phrases per 100 words <b id="m-fdens">—</b></div>
   </div>
   <div class="byclass" id="m-byclass"></div>
   <div class="stamp" id="verdict" hidden></div>
   <div class="byclass" id="rec"></div>
+  <section class="ai" id="ai-result" hidden>
+    <label>AI check — does it still make sense after swapping?</label>
+    <div class="ledger">
+      <div class="cell">Original <b id="ai-orig">—</b></div>
+      <div class="cell">Swap 1 <b id="ai-m0">—</b></div>
+      <div class="cell">Swap 2 <b id="ai-m1">—</b></div>
+      <div class="cell">Swap 3 <b id="ai-m2">—</b></div>
+      <div class="cell">Sense lost <b id="ai-lost">—</b></div>
+    </div>
+    <div class="stamp" id="ai-reading"></div>
+    <div class="byclass" id="ai-explain"></div>
+  </section>
 
   <footer>
-    Detection is heuristic (suffix, notation, Title-Case, and numeric-claim
-    patterns) and will misfire on ordinary prose — including real proper nouns
-    and honest statistics. The levels are priors, not verdicts. The test is
-    your own read of the proof: tap any correction to cycle same-class
-    alternatives — the author's original shows in green — and if every version
-    argues as well as every other, the marked terms carried no semantic load.
+    Detection is rough and can flag normal writing. The real test is your own
+    read: tap red words to cycle swaps (green is the original). If every
+    version sounds equally convincing, the terms weren't doing any work.
   </footer>
 </div>
 
@@ -474,7 +561,7 @@ const HTML_ASSET = `<!DOCTYPE html>
     var text = input.value;
     if (!text.trim()) return;
     runBtn.disabled = true; rerollBtn.disabled = true;
-    proof.textContent = 'Mutating at edge…';
+    proof.textContent = 'Working…';
     try {
       var res = await fetch('/', {
         method: 'POST',
@@ -504,9 +591,9 @@ const HTML_ASSET = `<!DOCTYPE html>
       setMetric('m-fdens', data.metrics.frameDensity);
 
       var CLASS_LABELS = {
-        notation: 'notation', eponymPair: 'eponyms', jargonPair: 'jargon pairs',
-        standalone: 'standalone terms', coinage: 'coinages',
-        neologism: 'neologisms', quantity: 'numeric claims'
+        notation: 'symbols', eponymPair: 'named terms', jargonPair: 'jargon pairs',
+        standalone: 'math terms', coinage: 'made-up names',
+        neologism: 'made-up words', quantity: 'numbers'
       };
       var byClass = data.metrics.byClass || {};
       setMetric('m-byclass', Object.keys(byClass).map(function(k){
@@ -515,12 +602,13 @@ const HTML_ASSET = `<!DOCTYPE html>
 
       var a = data.assessment;
       verdict.hidden = false;
-      verdict.textContent = 'APPARATUS: ' + a.apparatus + ' · FRAMING: ' + a.framing;
+      verdict.textContent = 'JARGON: ' + a.apparatus + ' · STOCK PHRASES: ' + a.framing;
       verdict.className = (a.apparatus === 'HIGH' || a.framing === 'HIGH') ? 'stamp hot' : 'stamp';
-      rec.textContent = 'Argument dependence: ' + a.argumentDependence.toLowerCase() + ' — ' + a.recommendation;
+      rec.textContent = a.recommendation;
 
       seedLabel.textContent = 'seed ' + data.seed;
       rerollBtn.disabled = false;
+      aiBtn.disabled = false;
     } catch (err) {
       proof.textContent = 'Error: ' + err.message;
       proof.style.color = 'var(--mark)';
@@ -529,8 +617,54 @@ const HTML_ASSET = `<!DOCTYPE html>
     }
   }
 
-  runBtn.addEventListener('click', function(){ seed = 0; run(); });
+  var aiBtn = document.getElementById('ai-btn');
+  var aiResult = document.getElementById('ai-result');
+  var aiReading = document.getElementById('ai-reading');
+  var aiExplain = document.getElementById('ai-explain');
+  var READING = {
+    'LOAD-BEARING': ['TERMS MATTER', "The original makes sense and the swapped versions don't."],
+    'DECORATIVE': ['DECORATIVE', 'It makes sense either way, so the terms were just decoration.'],
+    'INCOHERENT BEFORE SUBSTITUTION': ["DOESN'T MAKE SENSE", "The original doesn't make sense to begin with."],
+    'NOTHING TO SUBSTITUTE': ['NOTHING TO SWAP', 'No technical terms found.']
+  };
+  function pct(x){ return x == null ? '—' : Math.round(x * 100) + '%'; }
+
+  async function scoreAI(){
+    var text = input.value;
+    if (!text.trim()) return;
+    aiBtn.disabled = true;
+    aiResult.hidden = false;
+    aiReading.className = 'stamp';
+    aiReading.textContent = 'Checking…';
+    aiExplain.textContent = '';
+    try {
+      var res = await fetch('/score', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({ text: text })
+      });
+      var d = await res.json();
+      if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
+      setMetric('ai-orig', pct(d.original));
+      for (var i = 0; i < 3; i++) {
+        setMetric('ai-m' + i, pct(d.mutations[i] && d.mutations[i].coherence));
+      }
+      setMetric('ai-lost', pct(d.coherenceLost));
+      var r = READING[d.reading] || [d.reading, ''];
+      aiReading.textContent = r[0];
+      aiReading.className = d.reading === 'LOAD-BEARING' ? 'stamp' : 'stamp hot';
+      aiExplain.textContent = r[1] + (d.note ? ' ' + d.note : '');
+    } catch (err) {
+      aiReading.className = 'stamp hot';
+      aiReading.textContent = 'Error: ' + err.message;
+    } finally {
+      aiBtn.disabled = false;
+    }
+  }
+
+  runBtn.addEventListener('click', function(){ seed = 0; aiResult.hidden = true; run(); });
   rerollBtn.addEventListener('click', function(){ seed += 1; run(); });
+  aiBtn.addEventListener('click', scoreAI);
 })();
 </script>
 </body>
