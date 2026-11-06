@@ -9,3 +9,7 @@ compatibility_date = "2026-07-08"
 # routes = [
 #   { pattern = "yourdomain.com", custom_domain = true }
 # ]
+
+# Workers AI, used by POST /score (model-judged invariance via Clef).
+[ai]
+binding = "AI"

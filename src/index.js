@@ -8,12 +8,18 @@
  *   1. substitution density  — how much of the text is swappable apparatus
  *   2. frame density         — rhetorical framing moves per token
  *
- * POST /  { text: string, seed?: number }  →  JSON analysis
+ * Optionally, a third signal from a model judge (Workers AI, Clef):
+ *   3. coherence under substitution — the original and several mutations are
+ *      scored for coherence; a collapse means the terms were load-bearing,
+ *      no change means they weren't.
+ *
+ * POST /       { text: string, seed?: number }  →  JSON analysis
+ * POST /score  { text: string }                 →  model-judged invariance
  * GET  /  →  UI
  */
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
     if (request.method === "GET") {
       return new Response(HTML_ASSET, {
         headers: { "content-type": "text/html; charset=utf-8" },
@@ -31,10 +37,19 @@ export default {
       if (!raw.trim()) return json({ error: "Empty text payload" }, 400);
       if (raw.length > 60_000) return json({ error: "Text exceeds 60,000 characters" }, 413);
 
-      const seed = Number.isInteger(body.seed) ? body.seed : 0;
       // Strip marker characters so input cannot forge highlight spans downstream.
       const text = raw.replace(/[⟦⟧]/g, "");
 
+      if (new URL(request.url).pathname === "/score") {
+        if (!env.AI) return json({ error: "AI scoring is not configured on this deployment" }, 501);
+        try {
+          return json(await score(text, env.AI));
+        } catch (err) {
+          return json({ error: "AI scoring failed: " + (err && err.message || err) }, 502);
+        }
+      }
+
+      const seed = Number.isInteger(body.seed) ? body.seed : 0;
       return json(analyze(text, seed));
     }
 
@@ -314,6 +329,69 @@ function analyze(text, seed) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Model-judged invariance (Workers AI, Clef)                         */
+/* ------------------------------------------------------------------ */
+
+const SCORE_SEEDS = [0, 1, 2];
+const CLEF_QUESTIONS = {
+  coherent: {
+    type: "noul",
+    instructions:
+      "Does this passage make a coherent, internally consistent argument in " +
+      "which each technical term fits what is claimed about it?",
+  },
+};
+
+async function judgeCoherence(ai, state) {
+  const res = await ai.run("@cf/cloudflare/clef", {
+    model: "clef",
+    state,
+    questions: CLEF_QUESTIONS,
+  });
+  const p = res && res.answers && res.answers.coherent && res.answers.coherent.noul;
+  if (typeof p !== "number") throw new Error("unexpected Clef response");
+  return p;
+}
+
+// The judge scores the original and several mutations with identical
+// questions. Invariance is read from the change, not from any single score:
+// a coherent original whose mutations collapse had load-bearing terms; a
+// coherent original that survives substitution had decorative ones; an
+// incoherent original has no argument for its terms to carry.
+async function score(text, ai) {
+  const mutations = SCORE_SEEDS.map((s) => {
+    const { mutatedText, substitutions } = mutate(text, s);
+    return { seed: s, text: mutatedText.replace(/[⟦⟧]/g, ""), substitutions };
+  });
+  if (mutations[0].substitutions === 0) {
+    return { reading: "NOTHING TO SUBSTITUTE", original: null, mutations: [], coherenceLost: null };
+  }
+
+  const [original, ...mutated] = await Promise.all([
+    judgeCoherence(ai, text),
+    ...mutations.map((m) => judgeCoherence(ai, m.text)),
+  ]);
+  const meanMutated = mutated.reduce((a, b) => a + b, 0) / mutated.length;
+  const coherenceLost = Math.max(0, original - meanMutated);
+
+  const reading =
+    original < 0.5 ? "INCOHERENT BEFORE SUBSTITUTION"
+    : coherenceLost >= 0.3 ? "LOAD-BEARING"
+    : "DECORATIVE";
+
+  const r4 = (x) => +x.toFixed(4);
+  return {
+    reading,
+    original: r4(original),
+    mutations: mutations.map((m, i) => ({ seed: m.seed, coherence: r4(mutated[i]) })),
+    coherenceLost: r4(coherenceLost),
+    note:
+      "A model's judgment, not a proof: fluent nonsense can fool a model the " +
+      "same way it fools a reader. Read it alongside your own read of the proof.",
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /*  UI — galley-proof aesthetic: the mutated terms read as an          */
 /*  editor's correction stamps on a typescript.                        */
 /* ------------------------------------------------------------------ */
@@ -380,6 +458,7 @@ const HTML_ASSET = `<!DOCTYPE html>
   }
   .stamp.hot{border-color:var(--mark);color:var(--mark)}
   .byclass{margin-top:.6rem;color:var(--dim);font-size:.8rem;letter-spacing:.04em}
+  .ai{margin-top:1.6rem;border-top:3px double var(--ink);padding-top:1rem}
   footer{margin-top:1.6rem;color:var(--dim);font-size:.78rem;max-width:70ch}
   @media(prefers-reduced-motion:no-preference){
     .stamp{transition:transform .12s ease}
@@ -391,7 +470,7 @@ const HTML_ASSET = `<!DOCTYPE html>
 <div class="sheet">
   <header>
     <h1>Substitution Invariance Test</h1>
-    <small>v2.2 — class-preserving mutation of technical and pseudo-technical apparatus, edge-executed, reader-scored</small>
+    <small>v2.3 — class-preserving mutation of technical and pseudo-technical apparatus, edge-executed, reader-scored, optionally model-judged</small>
   </header>
 
   <div class="grid">
@@ -402,6 +481,7 @@ const HTML_ASSET = `<!DOCTYPE html>
       <div class="controls">
         <button id="run-btn">Run test</button>
         <button id="reroll-btn" class="secondary" disabled>Re-mutate</button>
+        <button id="ai-btn" class="secondary" disabled>Score with AI</button>
         <span class="seed" id="seed-label"></span>
       </div>
     </section>
@@ -421,6 +501,18 @@ const HTML_ASSET = `<!DOCTYPE html>
   <div class="byclass" id="m-byclass"></div>
   <div class="stamp" id="verdict" hidden></div>
   <div class="byclass" id="rec"></div>
+  <section class="ai" id="ai-result" hidden>
+    <label>Model judge — coherence under substitution</label>
+    <div class="ledger">
+      <div class="cell">Original <b id="ai-orig">—</b></div>
+      <div class="cell">Mutation 1 <b id="ai-m0">—</b></div>
+      <div class="cell">Mutation 2 <b id="ai-m1">—</b></div>
+      <div class="cell">Mutation 3 <b id="ai-m2">—</b></div>
+      <div class="cell">Coherence lost <b id="ai-lost">—</b></div>
+    </div>
+    <div class="stamp" id="ai-reading"></div>
+    <div class="byclass" id="ai-explain"></div>
+  </section>
 
   <footer>
     Detection is heuristic (suffix, notation, Title-Case, and numeric-claim
@@ -521,6 +613,7 @@ const HTML_ASSET = `<!DOCTYPE html>
 
       seedLabel.textContent = 'seed ' + data.seed;
       rerollBtn.disabled = false;
+      aiBtn.disabled = false;
     } catch (err) {
       proof.textContent = 'Error: ' + err.message;
       proof.style.color = 'var(--mark)';
@@ -529,8 +622,53 @@ const HTML_ASSET = `<!DOCTYPE html>
     }
   }
 
-  runBtn.addEventListener('click', function(){ seed = 0; run(); });
+  var aiBtn = document.getElementById('ai-btn');
+  var aiResult = document.getElementById('ai-result');
+  var aiReading = document.getElementById('ai-reading');
+  var aiExplain = document.getElementById('ai-explain');
+  var EXPLAIN = {
+    'LOAD-BEARING': 'The original reads as coherent and the mutations do not: the substituted terms were doing real work.',
+    'DECORATIVE': 'The original reads as coherent and still does after substitution: the swapped terms carried no load.',
+    'INCOHERENT BEFORE SUBSTITUTION': 'The original does not read as a coherent argument, so substitution has nothing to break: there was no argument for the terms to carry.',
+    'NOTHING TO SUBSTITUTE': 'No apparatus was detected, so there is nothing to mutate and score.'
+  };
+  function pct(x){ return x == null ? '—' : Math.round(x * 100) + '%'; }
+
+  async function scoreAI(){
+    var text = input.value;
+    if (!text.trim()) return;
+    aiBtn.disabled = true;
+    aiResult.hidden = false;
+    aiReading.className = 'stamp';
+    aiReading.textContent = 'Judging original + 3 mutations…';
+    aiExplain.textContent = '';
+    try {
+      var res = await fetch('/score', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({ text: text })
+      });
+      var d = await res.json();
+      if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
+      setMetric('ai-orig', pct(d.original));
+      for (var i = 0; i < 3; i++) {
+        setMetric('ai-m' + i, pct(d.mutations[i] && d.mutations[i].coherence));
+      }
+      setMetric('ai-lost', pct(d.coherenceLost));
+      aiReading.textContent = d.reading;
+      aiReading.className = d.reading === 'LOAD-BEARING' ? 'stamp' : 'stamp hot';
+      aiExplain.textContent = (EXPLAIN[d.reading] || '') + (d.note ? ' ' + d.note : '');
+    } catch (err) {
+      aiReading.className = 'stamp hot';
+      aiReading.textContent = 'Error: ' + err.message;
+    } finally {
+      aiBtn.disabled = false;
+    }
+  }
+
+  runBtn.addEventListener('click', function(){ seed = 0; aiResult.hidden = true; run(); });
   rerollBtn.addEventListener('click', function(){ seed += 1; run(); });
+  aiBtn.addEventListener('click', scoreAI);
 })();
 </script>
 </body>
