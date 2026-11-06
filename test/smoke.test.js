@@ -28,6 +28,10 @@ async function post(text, seed = 1) {
   assert.match(res.headers.get("content-type"), /text\/html/);
   const html = await res.text();
   assert.match(html, /Substitution Invariance Test/);
+  // The UI script lives inside a JS template literal, where escapes like \'
+  // silently collapse; make sure what the browser receives still parses.
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  assert.doesNotThrow(() => new Function(script), "inline UI script parses");
 }
 
 // POST analyzes text and mutates detected apparatus
